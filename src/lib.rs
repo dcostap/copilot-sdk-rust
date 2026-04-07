@@ -164,6 +164,9 @@ pub use events::{
     AssistantTurnEndData,
     AssistantTurnStartData,
     AssistantUsageData,
+    BackgroundAgentData,
+    BackgroundShellData,
+    BackgroundTasksData,
     CompactionTokensUsed,
     CustomAgentCompletedData,
     CustomAgentFailedData,
@@ -177,6 +180,7 @@ pub use events::{
     // Main event types
     RawSessionEvent,
     RepositoryInfo,
+    SessionBackgroundTasksChangedData,
     SessionCompactionCompleteData,
     SessionCompactionStartData,
     SessionErrorData,

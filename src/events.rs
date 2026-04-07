@@ -6,7 +6,7 @@
 //! Events are received from the Copilot CLI during a session. They include
 //! assistant messages, tool executions, session lifecycle events, and more.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
 // =============================================================================
@@ -91,6 +91,35 @@ pub struct SystemMessageMetadata {
     pub variables: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Snapshot of background tasks still known to the session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTasksData {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<BackgroundAgentData>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shells: Vec<BackgroundShellData>,
+}
+
+/// Metadata for a running background agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundAgentData {
+    pub agent_id: String,
+    pub agent_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Metadata for a running background shell command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundShellData {
+    pub shell_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 // =============================================================================
 // Event Data Types
 // =============================================================================
@@ -137,7 +166,17 @@ pub struct SessionErrorData {
 
 /// Data for session.idle event.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SessionIdleData {}
+#[serde(rename_all = "camelCase")]
+pub struct SessionIdleData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_tasks: Option<BackgroundTasksData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aborted: Option<bool>,
+}
+
+/// Data for session.background_tasks_changed event.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionBackgroundTasksChangedData {}
 
 /// Data for session.info event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,6 +634,7 @@ pub enum SessionEventData {
     SessionResume(SessionResumeData),
     SessionError(SessionErrorData),
     SessionIdle(SessionIdleData),
+    SessionBackgroundTasksChanged(SessionBackgroundTasksChangedData),
     SessionInfo(SessionInfoData),
     SessionModelChange(SessionModelChangeData),
     SessionHandoff(SessionHandoffData),
@@ -769,125 +809,101 @@ impl SessionEvent {
     }
 }
 
+fn parse_typed_event_data<T>(
+    data: serde_json::Value,
+    map: impl FnOnce(T) -> SessionEventData,
+) -> SessionEventData
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_value::<T>(data.clone()) {
+        Ok(parsed) => map(parsed),
+        Err(_) => SessionEventData::Unknown(data),
+    }
+}
+
 /// Parse event data based on event type string.
 fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventData {
     match event_type {
-        "session.start" => serde_json::from_value(data)
-            .map(SessionEventData::SessionStart)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.resume" => serde_json::from_value(data)
-            .map(SessionEventData::SessionResume)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.error" => serde_json::from_value(data)
-            .map(SessionEventData::SessionError)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.idle" => SessionEventData::SessionIdle(SessionIdleData {}),
-        "session.info" => serde_json::from_value(data)
-            .map(SessionEventData::SessionInfo)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.model_change" => serde_json::from_value(data)
-            .map(SessionEventData::SessionModelChange)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.handoff" => serde_json::from_value(data)
-            .map(SessionEventData::SessionHandoff)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.truncation" => serde_json::from_value(data)
-            .map(SessionEventData::SessionTruncation)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "user.message" => serde_json::from_value(data)
-            .map(SessionEventData::UserMessage)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "session.start" => parse_typed_event_data(data, SessionEventData::SessionStart),
+        "session.resume" => parse_typed_event_data(data, SessionEventData::SessionResume),
+        "session.error" => parse_typed_event_data(data, SessionEventData::SessionError),
+        "session.idle" => parse_typed_event_data(data, SessionEventData::SessionIdle),
+        "session.background_tasks_changed" => {
+            parse_typed_event_data(data, SessionEventData::SessionBackgroundTasksChanged)
+        }
+        "session.info" => parse_typed_event_data(data, SessionEventData::SessionInfo),
+        "session.model_change" => {
+            parse_typed_event_data(data, SessionEventData::SessionModelChange)
+        }
+        "session.handoff" => parse_typed_event_data(data, SessionEventData::SessionHandoff),
+        "session.truncation" => parse_typed_event_data(data, SessionEventData::SessionTruncation),
+        "user.message" => parse_typed_event_data(data, SessionEventData::UserMessage),
         "pending_messages.modified" => {
-            SessionEventData::PendingMessagesModified(PendingMessagesModifiedData {})
+            parse_typed_event_data(data, SessionEventData::PendingMessagesModified)
         }
-        "assistant.turn_start" => serde_json::from_value(data)
-            .map(SessionEventData::AssistantTurnStart)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "assistant.intent" => serde_json::from_value(data)
-            .map(SessionEventData::AssistantIntent)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "assistant.reasoning" => serde_json::from_value(data)
-            .map(SessionEventData::AssistantReasoning)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "assistant.reasoning_delta" => serde_json::from_value(data)
-            .map(SessionEventData::AssistantReasoningDelta)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "assistant.message" => serde_json::from_value(data)
-            .map(SessionEventData::AssistantMessage)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "assistant.message_delta" => serde_json::from_value(data)
-            .map(SessionEventData::AssistantMessageDelta)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "assistant.turn_end" => serde_json::from_value(data)
-            .map(SessionEventData::AssistantTurnEnd)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "assistant.usage" => serde_json::from_value(data)
-            .map(SessionEventData::AssistantUsage)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "abort" => serde_json::from_value(data)
-            .map(SessionEventData::Abort)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "tool.user_requested" => serde_json::from_value(data)
-            .map(SessionEventData::ToolUserRequested)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "tool.execution_start" => serde_json::from_value(data)
-            .map(SessionEventData::ToolExecutionStart)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "tool.execution_partial_result" => serde_json::from_value(data)
-            .map(SessionEventData::ToolExecutionPartialResult)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "tool.execution_complete" => serde_json::from_value(data)
-            .map(SessionEventData::ToolExecutionComplete)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "tool.execution_progress" => serde_json::from_value(data)
-            .map(SessionEventData::ToolExecutionProgress)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "assistant.turn_start" => {
+            parse_typed_event_data(data, SessionEventData::AssistantTurnStart)
+        }
+        "assistant.intent" => parse_typed_event_data(data, SessionEventData::AssistantIntent),
+        "assistant.reasoning" => parse_typed_event_data(data, SessionEventData::AssistantReasoning),
+        "assistant.reasoning_delta" => {
+            parse_typed_event_data(data, SessionEventData::AssistantReasoningDelta)
+        }
+        "assistant.message" => parse_typed_event_data(data, SessionEventData::AssistantMessage),
+        "assistant.message_delta" => {
+            parse_typed_event_data(data, SessionEventData::AssistantMessageDelta)
+        }
+        "assistant.turn_end" => parse_typed_event_data(data, SessionEventData::AssistantTurnEnd),
+        "assistant.usage" => parse_typed_event_data(data, SessionEventData::AssistantUsage),
+        "abort" => parse_typed_event_data(data, SessionEventData::Abort),
+        "tool.user_requested" => parse_typed_event_data(data, SessionEventData::ToolUserRequested),
+        "tool.execution_start" => {
+            parse_typed_event_data(data, SessionEventData::ToolExecutionStart)
+        }
+        "tool.execution_partial_result" => {
+            parse_typed_event_data(data, SessionEventData::ToolExecutionPartialResult)
+        }
+        "tool.execution_complete" => {
+            parse_typed_event_data(data, SessionEventData::ToolExecutionComplete)
+        }
+        "tool.execution_progress" => {
+            parse_typed_event_data(data, SessionEventData::ToolExecutionProgress)
+        }
         // Primary wire names (subagent.*) + legacy aliases (custom_agent.*)
-        "subagent.started" | "custom_agent.started" => serde_json::from_value(data)
-            .map(SessionEventData::CustomAgentStarted)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "subagent.completed" | "custom_agent.completed" => serde_json::from_value(data)
-            .map(SessionEventData::CustomAgentCompleted)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "subagent.failed" | "custom_agent.failed" => serde_json::from_value(data)
-            .map(SessionEventData::CustomAgentFailed)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "subagent.selected" | "custom_agent.selected" => serde_json::from_value(data)
-            .map(SessionEventData::CustomAgentSelected)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "hook.start" => serde_json::from_value(data)
-            .map(SessionEventData::HookStart)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "hook.end" => serde_json::from_value(data)
-            .map(SessionEventData::HookEnd)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "system.message" => serde_json::from_value(data)
-            .map(SessionEventData::SystemMessage)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.compaction_start" => {
-            SessionEventData::SessionCompactionStart(SessionCompactionStartData {})
+        "subagent.started" | "custom_agent.started" => {
+            parse_typed_event_data(data, SessionEventData::CustomAgentStarted)
         }
-        "session.compaction_complete" => serde_json::from_value(data)
-            .map(SessionEventData::SessionCompactionComplete)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.shutdown" => serde_json::from_value(data)
-            .map(SessionEventData::SessionShutdown)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.snapshot_rewind" => serde_json::from_value(data)
-            .map(SessionEventData::SessionSnapshotRewind)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "session.usage_info" => serde_json::from_value(data)
-            .map(SessionEventData::SessionUsageInfo)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "skill.invoked" => serde_json::from_value(data)
-            .map(SessionEventData::SkillInvoked)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "external_tool.requested" => serde_json::from_value(data)
-            .map(SessionEventData::ExternalToolRequested)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "permission.requested" => serde_json::from_value(data)
-            .map(SessionEventData::PermissionRequested)
-            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "subagent.completed" | "custom_agent.completed" => {
+            parse_typed_event_data(data, SessionEventData::CustomAgentCompleted)
+        }
+        "subagent.failed" | "custom_agent.failed" => {
+            parse_typed_event_data(data, SessionEventData::CustomAgentFailed)
+        }
+        "subagent.selected" | "custom_agent.selected" => {
+            parse_typed_event_data(data, SessionEventData::CustomAgentSelected)
+        }
+        "hook.start" => parse_typed_event_data(data, SessionEventData::HookStart),
+        "hook.end" => parse_typed_event_data(data, SessionEventData::HookEnd),
+        "system.message" => parse_typed_event_data(data, SessionEventData::SystemMessage),
+        "session.compaction_start" => {
+            parse_typed_event_data(data, SessionEventData::SessionCompactionStart)
+        }
+        "session.compaction_complete" => {
+            parse_typed_event_data(data, SessionEventData::SessionCompactionComplete)
+        }
+        "session.shutdown" => parse_typed_event_data(data, SessionEventData::SessionShutdown),
+        "session.snapshot_rewind" => {
+            parse_typed_event_data(data, SessionEventData::SessionSnapshotRewind)
+        }
+        "session.usage_info" => parse_typed_event_data(data, SessionEventData::SessionUsageInfo),
+        "skill.invoked" => parse_typed_event_data(data, SessionEventData::SkillInvoked),
+        "external_tool.requested" => {
+            parse_typed_event_data(data, SessionEventData::ExternalToolRequested)
+        }
+        "permission.requested" => {
+            parse_typed_event_data(data, SessionEventData::PermissionRequested)
+        }
         // Unknown event type - preserve raw data
         _ => SessionEventData::Unknown(data),
     }
@@ -949,6 +965,82 @@ mod tests {
         let event = SessionEvent::from_json(&json).unwrap();
         assert!(event.is_session_idle());
         assert!(event.is_terminal());
+        if let SessionEventData::SessionIdle(data) = &event.data {
+            assert!(data.background_tasks.is_none());
+            assert!(data.aborted.is_none());
+        } else {
+            panic!("Expected SessionIdle");
+        }
+    }
+
+    #[test]
+    fn test_parse_session_idle_background_tasks() {
+        let json = json!({
+            "id": "evt_idle_background",
+            "timestamp": "2024-01-15T10:30:02Z",
+            "type": "session.idle",
+            "data": {
+                "backgroundTasks": {
+                    "agents": [
+                        {
+                            "agentId": "agent_123",
+                            "agentType": "task",
+                            "description": "Run PowerShell sleep"
+                        }
+                    ],
+                    "shells": [
+                        {
+                            "shellId": "shell_456",
+                            "description": "Start-Sleep -Seconds 10"
+                        }
+                    ]
+                },
+                "aborted": false
+            }
+        });
+
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::SessionIdle(data) = &event.data {
+            let background_tasks = data
+                .background_tasks
+                .as_ref()
+                .expect("Expected background tasks");
+            assert_eq!(background_tasks.agents.len(), 1);
+            assert_eq!(background_tasks.agents[0].agent_id, "agent_123");
+            assert_eq!(background_tasks.agents[0].agent_type, "task");
+            assert_eq!(
+                background_tasks.agents[0].description.as_deref(),
+                Some("Run PowerShell sleep")
+            );
+            assert_eq!(background_tasks.shells.len(), 1);
+            assert_eq!(background_tasks.shells[0].shell_id, "shell_456");
+            assert_eq!(
+                background_tasks.shells[0].description.as_deref(),
+                Some("Start-Sleep -Seconds 10")
+            );
+            assert_eq!(data.aborted, Some(false));
+        } else {
+            panic!("Expected SessionIdle");
+        }
+    }
+
+    #[test]
+    fn test_parse_background_tasks_changed() {
+        let json = json!({
+            "id": "evt_background_change",
+            "timestamp": "2024-01-15T10:30:03Z",
+            "type": "session.background_tasks_changed",
+            "ephemeral": true,
+            "data": {}
+        });
+
+        let event = SessionEvent::from_json(&json).unwrap();
+        assert_eq!(event.event_type, "session.background_tasks_changed");
+        assert_eq!(event.ephemeral, Some(true));
+        assert!(matches!(
+            event.data,
+            SessionEventData::SessionBackgroundTasksChanged(_)
+        ));
     }
 
     #[test]
@@ -1413,6 +1505,27 @@ mod tests {
         let event = SessionEvent::from_json(&json).unwrap();
         assert_eq!(event.event_type, "some.future.event.type");
         assert!(matches!(event.data, SessionEventData::Unknown(_)));
+    }
+
+    #[test]
+    fn test_parse_failure_preserves_raw_payload() {
+        let json = json!({
+            "id": "evt_bad_payload",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "type": "session.error",
+            "data": {
+                "errorType": "provider_error",
+                "message": 42
+            }
+        });
+
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::Unknown(raw) = &event.data {
+            assert_eq!(raw["errorType"], "provider_error");
+            assert_eq!(raw["message"], 42);
+        } else {
+            panic!("Expected Unknown with preserved raw payload");
+        }
     }
 
     #[test]
